@@ -19,9 +19,9 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/axiomq/saml/logger"
+	"github.com/axiomq/saml/xmlenc"
 	"github.com/beevik/etree"
-	"github.com/crewjam/saml/logger"
-	"github.com/crewjam/saml/xmlenc"
 	dsig "github.com/russellhaering/goxmldsig"
 )
 

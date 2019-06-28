@@ -4,10 +4,11 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
 	"net/http"
 	"time"
 
-	"github.com/crewjam/saml"
+	"github.com/axiomq/saml"
 	"github.com/dgrijalva/jwt-go"
 )
 
@@ -89,6 +90,22 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.NotFoundHandler().ServeHTTP(w, r)
+}
+
+// ValidateRequest is a similar method to ValidateRequest; what changed is the way that request is handled:
+// no response is returned to the http.ResponseWriter, instead an *AuthorizationToken is returned, along with an error.
+func (m *Middleware) ValidateRequest(r *http.Request) (*AuthorizationToken, error) {
+	if r.URL.Path == m.ServiceProvider.AcsURL.Path {
+		r.ParseForm()
+		assertion, err := m.ServiceProvider.ParseResponse(r, m.getPossibleRequestIDs(r))
+		if err != nil {
+			return nil, err
+		}
+
+		return m.AuthorizeRequest(r, assertion)
+	}
+
+	return nil, errors.New("invalid request path")
 }
 
 // RequireAccount is HTTP middleware that requires that each request be
@@ -262,6 +279,54 @@ func (m *Middleware) Authorize(w http.ResponseWriter, r *http.Request, assertion
 
 	m.ClientToken.SetToken(w, r, signedToken, m.TokenMaxAge)
 	http.Redirect(w, r, redirectURI, http.StatusFound)
+}
+
+// AuthorizeRequest is similar method to Authorize method; what changed is the way is the way the request is handled:
+// no response is returned to the http.ResponseWriter, instead an *AuthorizationToken is returned, along with an error.
+func (m *Middleware) AuthorizeRequest(r *http.Request, assertion *saml.Assertion) (*AuthorizationToken, error) {
+	secretBlock := x509.MarshalPKCS1PrivateKey(m.ServiceProvider.Key)
+
+	if relayState := r.Form.Get("RelayState"); relayState != "" {
+		stateValue := m.ClientState.GetState(r, relayState)
+		if stateValue == "" {
+			return nil, errors.New("empty RelayState value")
+		}
+
+		jwtParser := jwt.Parser{
+			ValidMethods: []string{jwtSigningMethod.Name},
+		}
+		state, err := jwtParser.Parse(stateValue, func(t *jwt.Token) (interface{}, error) {
+			return secretBlock, nil
+		})
+		if err != nil || !state.Valid {
+			return nil, errors.New("unable to decode state JWT")
+		}
+	}
+
+	now := saml.TimeNow()
+	claims := AuthorizationToken{}
+	claims.Audience = m.ServiceProvider.Metadata().EntityID
+	claims.IssuedAt = now.Unix()
+	claims.ExpiresAt = now.Add(m.TokenMaxAge).Unix()
+	claims.NotBefore = now.Unix()
+	if sub := assertion.Subject; sub != nil {
+		if nameID := sub.NameID; nameID != nil {
+			claims.StandardClaims.Subject = nameID.Value
+		}
+	}
+	for _, attributeStatement := range assertion.AttributeStatements {
+		claims.Attributes = map[string][]string{}
+		for _, attr := range attributeStatement.Attributes {
+			claimName := attr.FriendlyName
+			if claimName == "" {
+				claimName = attr.Name
+			}
+			for _, value := range attr.Values {
+				claims.Attributes[claimName] = append(claims.Attributes[claimName], value.Value)
+			}
+		}
+	}
+	return &claims, nil
 }
 
 // IsAuthorized returns true if the request has already been authorized.
