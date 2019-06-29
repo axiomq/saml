@@ -92,20 +92,21 @@ func (m *Middleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFoundHandler().ServeHTTP(w, r)
 }
 
-// ValidateRequest is a similar method to ValidateRequest; what changed is the way that request is handled:
-// no response is returned to the http.ResponseWriter, instead an *AuthorizationToken is returned, along with an error.
-func (m *Middleware) ValidateRequest(r *http.Request) (*AuthorizationToken, error) {
+// ValidateRequest is similar to ValidateRequest method; changes include:
+// no response is returned to the http.ResponseWriter, instead an *AuthorizationToken is returned, along with a redirectURL,
+// and an error.
+func (m *Middleware) ValidateRequest(w http.ResponseWriter, r *http.Request) (*AuthorizationToken, string, error) {
 	if r.URL.Path == m.ServiceProvider.AcsURL.Path {
 		r.ParseForm()
 		assertion, err := m.ServiceProvider.ParseResponse(r, m.getPossibleRequestIDs(r))
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 
-		return m.AuthorizeRequest(r, assertion)
+		return m.AuthorizeRequest(w, r, assertion)
 	}
 
-	return nil, errors.New("invalid request path")
+	return nil, "", errors.New("invalid request path")
 }
 
 // RequireAccount is HTTP middleware that requires that each request be
@@ -281,15 +282,17 @@ func (m *Middleware) Authorize(w http.ResponseWriter, r *http.Request, assertion
 	http.Redirect(w, r, redirectURI, http.StatusFound)
 }
 
-// AuthorizeRequest is similar method to Authorize method; what changed is the way is the way the request is handled:
-// no response is returned to the http.ResponseWriter, instead an *AuthorizationToken is returned, along with an error.
-func (m *Middleware) AuthorizeRequest(r *http.Request, assertion *saml.Assertion) (*AuthorizationToken, error) {
+// AuthorizeRequest is similar to Authorize method; changes include:
+// no response is returned to the http.ResponseWriter, instead an *AuthorizationToken is returned, along with a redirectURL,
+// and an error.
+func (m *Middleware) AuthorizeRequest(w http.ResponseWriter, r *http.Request, assertion *saml.Assertion) (*AuthorizationToken, string, error) {
 	secretBlock := x509.MarshalPKCS1PrivateKey(m.ServiceProvider.Key)
 
+	redirectURI := "/"
 	if relayState := r.Form.Get("RelayState"); relayState != "" {
 		stateValue := m.ClientState.GetState(r, relayState)
 		if stateValue == "" {
-			return nil, errors.New("empty RelayState value")
+			return nil, redirectURI, errors.New("empty RelayState value")
 		}
 
 		jwtParser := jwt.Parser{
@@ -299,8 +302,14 @@ func (m *Middleware) AuthorizeRequest(r *http.Request, assertion *saml.Assertion
 			return secretBlock, nil
 		})
 		if err != nil || !state.Valid {
-			return nil, errors.New("unable to decode state JWT")
+			return nil, redirectURI, errors.New("unable to decode state JWT")
 		}
+
+		claims := state.Claims.(jwt.MapClaims)
+		redirectURI = claims["uri"].(string)
+
+		// delete the cookie
+		m.ClientState.DeleteState(w, r, relayState)
 	}
 
 	now := saml.TimeNow()
@@ -326,7 +335,7 @@ func (m *Middleware) AuthorizeRequest(r *http.Request, assertion *saml.Assertion
 			}
 		}
 	}
-	return &claims, nil
+	return &claims, redirectURI, nil
 }
 
 // IsAuthorized returns true if the request has already been authorized.
